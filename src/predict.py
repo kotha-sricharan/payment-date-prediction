@@ -344,9 +344,11 @@ def write_report(
     lines = []
     lines.append("# Payment Date Prediction — Report\n")
     lines.append(
-        "> Results on the bundled **synthetic** invoice sample. "
-        "Metrics are measured on the held-out test set; they are not "
-        "real-world accuracy or business-impact claims.\n"
+        "> Results from this portfolio rebuild on the bundled "
+        "**synthetic** invoice sample — **not** the original "
+        "internship's results. Metrics are measured on the held-out "
+        "test set; they are not real-world accuracy or "
+        "business-impact claims.\n"
     )
     lines.append("## Data\n")
     lines.append(f"- Rows loaded: **{info['rows']:,}** x "
