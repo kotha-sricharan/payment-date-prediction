@@ -13,19 +13,32 @@ Prediction, project HRC80781W) as a runnable, leakage-free pipeline:
   5. Feature preparation — date components, categorical encoding,
      customer-level average payment delay
   6. Model comparison — Linear Regression, SVR, Decision Tree,
-     Random Forest, XGBoost, all scored on the same held-out test set
-  7. Prediction output — predicted delays, predicted payment dates
+     Random Forest, XGBoost, compared on a validation split
+  7. Final evaluation — the winning model is refit on train +
+     validation and scored exactly once on an untouched test set
+  8. Prediction output — predicted delays, predicted payment dates
      and aging buckets for the unlabeled rows, exported as CSV
 
-Correctness fix vs. the original notebook
------------------------------------------
+Correctness fixes vs. the original notebook
+--------------------------------------------
 The original notebook computed customer-level target averages BEFORE
 splitting the data, so test-row features leaked their own target
 values and the reported scores were not reliable evidence of
-predictive performance. This rebuild splits the labeled data into
-train/test FIRST and computes every target-derived feature from the
-training split only; unseen customers fall back to the training
-global mean. All metrics below are measured on the held-out test set.
+predictive performance. This rebuild fixes three evaluation issues:
+
+1. Target leakage — the labeled data is split into train /
+   validation / test FIRST, and customer-level features are computed
+   from the training split only (unseen customers fall back to the
+   training global mean).
+2. Imputation leakage — missing payment terms are filled with the
+   most common term computed from the TRAINING split only, then
+   applied to validation, test, and unlabeled rows. (The pipeline's
+   own imputers and scaler are fit on training data only, as
+   scikit-learn Pipelines guarantee.)
+3. Selection on test — models are compared on the VALIDATION split.
+   The winner is refit on train + validation and evaluated exactly
+   once on the untouched test set, so the reported test metrics are
+   not the numbers the selection was tuned against.
 
 The bundled data is synthetic (see scripts/generate_sample_data.py).
 Metrics are results on that synthetic sample, not real-world accuracy
@@ -142,12 +155,18 @@ def clean(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
 
 
 def standardize(df: pd.DataFrame) -> pd.DataFrame:
-    """Parse dates, normalize amounts to USD, numeric payment terms."""
+    """Parse dates, normalize amounts to USD, numeric payment terms.
+
+    Missing payment terms are NOT filled here: the fill value (the
+    most common term) is a dataset statistic, so it is computed from
+    the training split only, after splitting — see
+    fill_terms_days_mode(). Filling it here would leak information
+    from validation/test rows into training.
+    """
     df = df.copy()
     df["terms_days"] = (
         df["cust_payment_terms"].str.extract(r"(\d+)")[0].astype(float)
     )
-    df["terms_days"] = df["terms_days"].fillna(df["terms_days"].mode()[0])
     df["amount_usd"] = np.where(
         df["invoice_currency"] == "CAD",
         df["amount_local"] * CAD_TO_USD,
@@ -158,6 +177,24 @@ def standardize(df: pd.DataFrame) -> pd.DataFrame:
         df["clear_date"] - df["due_in_date"]
     ).dt.days.astype("float")
     return df
+
+
+def fill_terms_days_mode(
+    train: pd.DataFrame, *frames: pd.DataFrame
+) -> list[pd.DataFrame]:
+    """Fill missing payment terms with the TRAINING mode only.
+
+    The most common term is computed from the training frame and then
+    applied to every other frame, so no information flows from
+    validation/test rows into training.
+    """
+    mode = float(train["terms_days"].mode()[0])
+    out = []
+    for df in frames:
+        df = df.copy()
+        df["terms_days"] = df["terms_days"].fillna(mode)
+        out.append(df)
+    return out
 
 
 def add_date_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -252,8 +289,8 @@ def plot_model_comparison(results: pd.DataFrame, path: Path) -> None:
     data = results.sort_values("rmse")
     bars = ax.barh(data["model"], data["rmse"], color="#1f77b4")
     ax.bar_label(bars, fmt="%.2f")
-    ax.set_xlabel("Test RMSE (days)")
-    ax.set_title("Model comparison — payment-delay prediction (held-out test set)")
+    ax.set_xlabel("Validation RMSE (days)")
+    ax.set_title("Model comparison — payment-delay prediction (validation set)")
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -300,6 +337,7 @@ def write_report(
     cleaning: dict,
     results: pd.DataFrame,
     best_model: str,
+    test_metrics: dict,
     predictions: pd.DataFrame,
     out_path: Path,
 ) -> None:
@@ -330,25 +368,48 @@ def write_report(
                  f"**{cleaning['rows_after']:,}** "
                  f"({cleaning['duplicates_removed']:,} duplicates removed)")
     lines.append("")
-    lines.append("## Leakage fix\n")
+    lines.append("## Evaluation design (leakage fixes)\n")
     lines.append(
-        "The labeled data was split into train/test **before** any "
-        "target-derived feature was computed. Customer-level average "
-        "delay and invoice counts come from the training split only; "
-        "unseen customers fall back to the training global mean. The "
-        "original notebook computed these averages before splitting, "
-        "which leaked each test row's own target into its features."
+        "1. The labeled data was split into train / validation / test "
+        "**before** any target-derived feature was computed. "
+        "Customer-level average delay and invoice counts come from "
+        "the training split only; unseen customers fall back to the "
+        "training global mean. The original notebook computed these "
+        "averages before splitting, which leaked each test row's own "
+        "target into its features."
+    )
+    lines.append(
+        "2. Missing payment terms are filled with the most common "
+        "term computed from the **training** split only, then applied "
+        "to validation, test, and unlabeled rows."
+    )
+    lines.append(
+        "3. Models were compared on the **validation** split. The "
+        "winner was refit on train + validation and evaluated exactly "
+        "once on the untouched test set, so the reported test metrics "
+        "are not the numbers the selection was tuned against."
     )
     lines.append("")
-    lines.append("## Model comparison (held-out test set)\n")
-    lines.append("| Model | RMSE (days) | MAE (days) | R² |")
-    lines.append("|-------|------------:|-----------:|---:|")
+    lines.append("## Model comparison (validation set)\n")
+    lines.append("| Model | Validation RMSE (days) | Validation MAE (days) | Validation R² |")
+    lines.append("|-------|-----------------------:|----------------------:|--------------:|")
     for row in results.sort_values("rmse").itertuples():
         lines.append(
             f"| {row.model} | {row.rmse:.2f} | {row.mae:.2f} | {row.r2:.3f} |"
         )
     lines.append(f"\n**Selected model: {best_model}** "
-                 "(lowest test RMSE).\n")
+                 "(lowest validation RMSE).\n")
+    lines.append("## Final evaluation (untouched test set, evaluated once)\n")
+    lines.append(
+        "The selected model was refit on train + validation and scored "
+        "a single time on the test set, which played no part in "
+        "training or model selection."
+    )
+    lines.append(f"- Model: **{best_model}**")
+    lines.append(f"- Test RMSE: **{test_metrics['rmse']:.2f} days**")
+    lines.append(f"- Test MAE: **{test_metrics['mae']:.2f} days**")
+    lines.append(f"- Test R²: **{test_metrics['r2']:.3f}**")
+    lines.append("")
     lines.append("## Prediction output\n")
     lines.append(
         f"- Invoices without a clearing date: **{len(predictions):,}**"
@@ -391,32 +452,60 @@ def main() -> int:
     print(f"Labeled (clearing date known): {len(labeled):,}")
     print(f"Unlabeled (to predict): {len(unlabeled):,}")
 
-    train, test = train_test_split(
+    # Labeled data: 60% train / 20% validation / 20% test.
+    # The test set is held out from the start and touched exactly
+    # once, for the final evaluation — it plays no part in training,
+    # imputation, feature building, or model selection.
+    train_val, test = train_test_split(
         labeled, test_size=TEST_SIZE, random_state=RANDOM_STATE
     )
-    train, test, unlabeled = add_customer_features(train, train, test, unlabeled)
-    print(f"Train: {len(train):,}  Test: {len(test):,}")
+    train, val = train_test_split(
+        train_val, test_size=0.25, random_state=RANDOM_STATE
+    )
+    print(f"Train: {len(train):,}  Validation: {len(val):,}  "
+          f"Test: {len(test):,} (untouched until final evaluation)")
+
+    # --- selection phase: every train-only statistic comes from `train`
+    train, val = fill_terms_days_mode(train, train, val)
+    train, val = add_customer_features(train, train, val)
 
     features = NUMERIC_FEATURES + CATEGORICAL_FEATURES
-    results = []
-    fitted = {}
+    val_results = []
     for name, model in get_models().items():
         pipe = Pipeline(
             [("prep", build_preprocessor()), ("model", model)]
         )
         pipe.fit(train[features], train["delay_days"])
-        pred = pipe.predict(test[features])
-        metrics = evaluate(test["delay_days"], pred)
+        pred = pipe.predict(val[features])
+        metrics = evaluate(val["delay_days"], pred)
         metrics["model"] = name
-        results.append(metrics)
-        fitted[name] = (pipe, pred)
-        print(f"{name:28s} RMSE {metrics['rmse']:7.2f}  "
+        val_results.append(metrics)
+        print(f"{name:28s} val RMSE {metrics['rmse']:7.2f}  "
               f"MAE {metrics['mae']:6.2f}  R2 {metrics['r2']:6.3f}")
 
-    results_df = pd.DataFrame(results)
-    best_model = results_df.sort_values("rmse").iloc[0]["model"]
-    best_pipe, best_test_pred = fitted[best_model]
-    print(f"\nSelected model: {best_model}")
+    val_df = pd.DataFrame(val_results)
+    best_model = val_df.sort_values("rmse").iloc[0]["model"]
+    print(f"\nSelected model (lowest validation RMSE): {best_model}")
+
+    # --- final phase: refit the winner on train + validation, then
+    # evaluate ONCE on the untouched test set ---
+    train_val, test, unlabeled = fill_terms_days_mode(
+        train_val, train_val, test, unlabeled
+    )
+    train_val, test, unlabeled = add_customer_features(
+        train_val, train_val, test, unlabeled
+    )
+    best_pipe = Pipeline(
+        [("prep", build_preprocessor()),
+         ("model", get_models()[best_model])]
+    )
+    best_pipe.fit(train_val[features], train_val["delay_days"])
+    test_pred = best_pipe.predict(test[features])
+    test_metrics = evaluate(test["delay_days"], test_pred)
+    print(f"Final test evaluation ({best_model}): "
+          f"RMSE {test_metrics['rmse']:.2f}  "
+          f"MAE {test_metrics['mae']:.2f}  "
+          f"R2 {test_metrics['r2']:.3f}")
 
     unlabeled_pred = best_pipe.predict(unlabeled[features])
     predictions = pd.DataFrame(
@@ -448,9 +537,9 @@ def main() -> int:
     ]
     predictions.to_csv(out_dir / "predictions.csv", index=False)
 
-    plot_model_comparison(results_df, out_dir / "model_comparison.png")
+    plot_model_comparison(val_df, out_dir / "model_comparison.png")
     plot_actual_vs_predicted(
-        test["delay_days"], best_test_pred,
+        test["delay_days"], test_pred,
         out_dir / "actual_vs_predicted.png",
     )
     plot_delay_distribution(
@@ -458,7 +547,7 @@ def main() -> int:
     )
     plot_aging_buckets(predictions, out_dir / "aging_buckets.png")
     write_report(
-        info, cleaning, results_df, best_model, predictions,
+        info, cleaning, val_df, best_model, test_metrics, predictions,
         out_dir / "report.md",
     )
     print(f"\nWrote: {out_dir / 'predictions.csv'} ({len(predictions):,} rows)")
