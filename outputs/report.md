@@ -1,6 +1,6 @@
 # Payment Date Prediction — Report
 
-> Results on the bundled **synthetic** invoice sample. Metrics are measured on the held-out test set; they are not real-world accuracy or business-impact claims.
+> Results from this portfolio rebuild on the bundled **synthetic** invoice sample — **not** the original internship's results. Metrics are measured on the held-out test set; they are not real-world accuracy or business-impact claims.
 
 ## Data
 
