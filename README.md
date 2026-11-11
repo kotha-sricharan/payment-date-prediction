@@ -55,21 +55,30 @@ Root Cause & Pareto Analyzer) are the direct connection to that work.
 | 3. Standardization | Parses date fields; normalizes USD/CAD amounts (CAD x 0.74 = USD); payment terms to numeric days |
 | 4. Dataset preparation | Splits 38,325 labeled rows (clearing date known) from 9,367 unlabeled rows (clearing date to predict) |
 | 5. Feature preparation | Date components, categorical encoding, and customer-level average payment delay |
-| 6. Model comparison | Linear Regression, Support Vector Regression, Decision Tree, Random Forest, XGBoost — all scored on the same held-out test set |
-| 7. Prediction output | Predicted delays, predicted payment dates, and aging buckets for the 9,367 open invoices, exported as CSV |
+| 6. Model comparison | Linear Regression, Support Vector Regression, Decision Tree, Random Forest, XGBoost — compared on a validation split |
+| 7. Final evaluation | The winning model is refit on train + validation and scored exactly once on an untouched test set |
+| 8. Prediction output | Predicted delays, predicted payment dates, and aging buckets for the 9,367 open invoices, exported as CSV |
 
-## Correctness fix vs. the original notebook
+## Correctness fixes vs. the original notebook
 
 The original notebook computed customer-level target averages **before**
 splitting the data, so test-row features leaked their own target values
 and its evaluation scores were not reliable evidence of predictive
-performance. This rebuild fixes that:
+performance. This rebuild fixes three evaluation issues:
 
-- The labeled data is split into train/test **first** (80/20).
-- Customer-level average delay and invoice counts are computed from
-  the **training split only**; unseen customers fall back to the
-  training global mean.
-- Every model is scored on the same held-out test set.
+1. **Target leakage** — the labeled data is split into train /
+   validation / test first, and customer-level features are computed
+   from the training split only (unseen customers fall back to the
+   training global mean).
+2. **Imputation leakage** — missing payment terms are filled with the
+   most common term computed from the **training** split only, then
+   applied to validation, test, and unlabeled rows. (The pipeline's
+   own imputers and scaler are fit on training data only, as
+   scikit-learn Pipelines guarantee.)
+3. **Selection on test** — models are compared on the **validation**
+   split. The winner is refit on train + validation and evaluated
+   exactly once on the untouched test set, so the reported test
+   metrics are not the numbers the selection was tuned against.
 
 A second real-world quirk is handled in the loader: the region code
 `"NA"` (North America) is a valid value, not a missing marker — pandas
@@ -83,19 +92,20 @@ Loaded: 50,000 rows x 19 columns
 After cleaning: 47,692 rows (2,308 duplicates removed)
 Labeled (clearing date known): 38,325
 Unlabeled (to predict): 9,367
-Train: 30,660  Test: 7,665
+Train: 22,995  Validation: 7,665  Test: 7,665 (untouched until final evaluation)
 ```
 
-| Model | Test RMSE (days) | Test MAE (days) | Test R² |
-|-------|-----------------:|----------------:|--------:|
-| Linear Regression | 12.12 | 9.71 | 0.698 |
-| XGBoost | 12.27 | 9.84 | 0.690 |
-| Support Vector Regression | 12.51 | 10.01 | 0.678 |
-| Random Forest | 12.52 | 10.05 | 0.677 |
-| Decision Tree | 17.79 | 14.27 | 0.349 |
+| Model | Validation RMSE (days) | Validation MAE (days) | Validation R² |
+|-------|-----------------------:|----------------------:|--------------:|
+| Linear Regression | 11.96 | 9.53 | 0.709 |
+| XGBoost | 12.12 | 9.67 | 0.701 |
+| Random Forest | 12.32 | 9.81 | 0.691 |
+| Support Vector Regression | 12.52 | 9.97 | 0.681 |
+| Decision Tree | 17.67 | 14.07 | 0.365 |
 
-Selected model: **Linear Regression** (lowest test RMSE). Predicted
-delay for the 9,367 open invoices: mean 15.1 days, median 12 days.
+Selected model: **Linear Regression** (lowest validation RMSE).
+Final evaluation — Linear Regression, scored once on the untouched
+test set: **RMSE 12.12 days, MAE 9.71 days, R² 0.698**.
 Aging buckets (predicted): Current 2,290; 1–30 days 5,222; 31–60 days
 1,686; 61–90 days 169; 90+ days 0.
 
