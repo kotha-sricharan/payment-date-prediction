@@ -2,7 +2,7 @@
 
 A Python pipeline that predicts when open B2B invoices will be paid:
 clean and validate the invoice ledger, engineer payment-behavior
-features, compare five regression models on a held-out test set, and
+features, compare five regression models on a validation split, and
 export predicted payment dates with aging buckets for the invoices
 still awaiting payment.
 
