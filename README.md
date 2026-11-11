@@ -85,7 +85,10 @@ A second real-world quirk is handled in the loader: the region code
 reads `"NA"` as NaN by default, so the loader switches off the default
 NA set and treats only empty strings as missing.
 
-## Sample output (on the bundled synthetic data)
+## Sample output (synthetic-data results from the portfolio rebuild)
+
+These are results from this portfolio rebuild on synthetic data —
+not the original internship's results.
 
 ```
 Loaded: 50,000 rows x 19 columns
